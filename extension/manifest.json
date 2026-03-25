@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "LobsterCLI",
+  "version": "0.3.0",
+  "description": "Page analysis, DOM extraction, API monitoring, and AI-powered summaries — powered by LobsterCLI's in-house engine.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "sidePanel",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_icon": {
+      "16": "icons/lobster-16.png",
+      "48": "icons/lobster-48.png",
+      "128": "icons/lobster-128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "icons": {
+    "16": "icons/lobster-16.png",
+    "48": "icons/lobster-48.png",
+    "128": "icons/lobster-128.png"
+  },
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "options_page": "options/options.html",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["shared/*.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

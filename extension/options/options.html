@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LobsterCLI Settings</title>
+  <style>
+    :root {
+      --bg: #0c0c0c;
+      --bg-secondary: #141414;
+      --bg-hover: #222222;
+      --border: #2a2a2a;
+      --text: #f0ece4;
+      --text-secondary: #a8a298;
+      --text-dim: #5c5850;
+      --accent: #c9a84c;
+      --accent-hover: #d4b65a;
+      --green: #6fcf7f;
+      --blue: #8ab4f8;
+      --yellow: #c9a84c;
+      --radius: 8px;
+      --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: var(--font);
+      font-size: 14px;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 40px 20px;
+    }
+
+    .container {
+      max-width: 520px;
+      width: 100%;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 30px;
+    }
+
+    .header h1 { font-size: 22px; font-weight: 500; letter-spacing: 0.3px; }
+    .header .logo { font-size: 28px; }
+
+    .section {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .section h2 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .field {
+      margin-bottom: 16px;
+    }
+
+    .field:last-child { margin-bottom: 0; }
+
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+
+    select, input[type="text"], input[type="password"] {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+      padding: 9px 12px;
+    }
+
+    select:focus, input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    select { cursor: pointer; }
+    select option { background: var(--bg); color: var(--text); }
+
+    .hint {
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-top: 4px;
+    }
+
+    .hint a {
+      color: var(--blue);
+      text-decoration: none;
+    }
+
+    .hint a:hover { text-decoration: underline; }
+
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 20px;
+    }
+
+    button {
+      background: var(--accent);
+      border: none;
+      color: white;
+      font-size: 13px;
+      font-weight: 500;
+      padding: 9px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    button:hover { background: var(--accent-hover); }
+
+    button.secondary {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+    }
+
+    button.secondary:hover {
+      background: var(--bg-hover);
+      color: var(--text);
+    }
+
+    .status {
+      margin-top: 16px;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      display: none;
+    }
+
+    .status.success {
+      display: block;
+      background: #22c55e15;
+      border: 1px solid #22c55e40;
+      color: var(--green);
+    }
+
+    .status.error {
+      display: block;
+      background: #ef444415;
+      border: 1px solid #ef444440;
+      color: var(--accent);
+    }
+
+    .provider-models {
+      display: none;
+    }
+
+    .info-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px 14px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    .info-box code {
+      font-family: var(--mono);
+      background: var(--bg-secondary);
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <span class="logo">&#x1F99E;</span>
+      <h1>LobsterCLI Settings</h1>
+    </div>
+
+    <div class="section">
+      <h2>AI Provider</h2>
+
+      <div class="field">
+        <label>Provider</label>
+        <select id="provider">
+          <option value="">None (AI features disabled)</option>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="ollama">Ollama (local, free)</option>
+        </select>
+      </div>
+
+      <div class="field" id="field-api-key" style="display:none">
+        <label>API Key</label>
+        <input type="password" id="api-key" placeholder="Enter your API key">
+        <div class="hint" id="key-hint"></div>
+      </div>
+
+      <div class="field" id="field-model" style="display:none">
+        <label>Model</label>
+        <select id="model"></select>
+      </div>
+
+      <div class="field" id="field-base-url" style="display:none">
+        <label>API Base URL (optional override)</label>
+        <input type="text" id="base-url" placeholder="Leave empty for default">
+      </div>
+
+      <div class="btn-row">
+        <button id="btn-save">Save Settings</button>
+        <button id="btn-test" class="secondary">Test Connection</button>
+      </div>
+
+      <div class="status" id="status"></div>
+    </div>
+
+    <div class="section">
+      <h2>About</h2>
+      <div class="info-box">
+        <p><strong>LobsterCLI Extension v0.1.0</strong></p>
+        <p style="margin-top:8px">Page analysis, DOM extraction, API monitoring, and AI-powered summaries.</p>
+        <p style="margin-top:8px">Works without AI for: page summary, markdown extraction, DOM snapshot, form detection, and network monitoring.</p>
+        <p style="margin-top:8px">AI features (optional) work with OpenAI, Anthropic, Google Gemini, or local Ollama.</p>
+        <p style="margin-top:12px">CLI companion: <code>npm install -g lobster-cli</code></p>
+      </div>
+    </div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

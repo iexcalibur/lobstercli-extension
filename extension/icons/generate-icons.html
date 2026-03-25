@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Generate Lobster Icons</title>
+</head>
+<body>
+  <p>Open this file in a browser and right-click each canvas to save as PNG.</p>
+  <div>
+    <h3>16x16</h3>
+    <canvas id="c16" width="16" height="16"></canvas>
+    <h3>48x48</h3>
+    <canvas id="c48" width="48" height="48"></canvas>
+    <h3>128x128</h3>
+    <canvas id="c128" width="128" height="128"></canvas>
+  </div>
+  <script>
+    function drawLobster(ctx, size) {
+      // Background circle
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.arc(size/2, size/2, size/2 - 1, 0, Math.PI * 2);
+      ctx.fill();
+
+      // L letter
+      ctx.fillStyle = 'white';
+      ctx.font = `bold ${size * 0.55}px -apple-system, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('L', size/2, size/2 + 1);
+    }
+
+    [16, 48, 128].forEach(size => {
+      const canvas = document.getElementById('c' + size);
+      const ctx = canvas.getContext('2d');
+      drawLobster(ctx, size);
+    });
+  </script>
+</body>
+</html>
