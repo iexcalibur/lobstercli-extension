@@ -53,6 +53,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'extractYoutubeTranscript') {
+    handleExtractYoutubeTranscript(message).then(sendResponse);
+    return true;
+  }
+
   if (message.action === 'testConnection') {
     handleTestConnection(message).then(sendResponse);
     return true;
@@ -375,6 +380,119 @@ async function handleExtractPdf({ url }) {
   } catch (err) {
     return { success: false, error: err.message };
   }
+}
+
+/**
+ * Extract transcript from a YouTube video.
+ * Fetches the watch page HTML, extracts caption track URLs,
+ * then fetches and parses the caption XML into plain text.
+ */
+async function handleExtractYoutubeTranscript({ url, videoId }) {
+  try {
+    // Fetch the YouTube watch page
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+    const html = await response.text();
+
+    // Extract ytInitialPlayerResponse from the page HTML
+    const playerMatch = html.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;\s*var/s)
+      || html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s);
+
+    if (!playerMatch) {
+      return { success: false, error: 'Could not extract player data from this page' };
+    }
+
+    let playerResponse;
+    try {
+      playerResponse = JSON.parse(playerMatch[1]);
+    } catch {
+      return { success: false, error: 'Failed to parse player data' };
+    }
+
+    // Extract video metadata
+    const videoDetails = playerResponse.videoDetails || {};
+    const title = videoDetails.title || 'Unknown';
+    const channel = videoDetails.author || 'Unknown';
+    const lengthSeconds = parseInt(videoDetails.lengthSeconds || '0', 10);
+    const minutes = Math.floor(lengthSeconds / 60);
+    const seconds = lengthSeconds % 60;
+    const duration = `${minutes}:${String(seconds).padStart(2, '0')}`;
+
+    // Get caption tracks
+    const captionTracks = playerResponse.captions
+      ?.playerCaptionsTracklistRenderer
+      ?.captionTracks;
+
+    if (!captionTracks || captionTracks.length === 0) {
+      return { success: false, error: 'No captions available for this video' };
+    }
+
+    // Pick best track: manual English > auto English > manual any > first
+    const bestTrack =
+      captionTracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr') ||
+      captionTracks.find(t => t.languageCode?.startsWith('en')) ||
+      captionTracks.find(t => t.kind !== 'asr') ||
+      captionTracks[0];
+
+    if (!bestTrack?.baseUrl) {
+      return { success: false, error: 'No usable caption track found' };
+    }
+
+    // Fetch caption XML
+    const captionResponse = await fetch(bestTrack.baseUrl);
+    const captionXml = await captionResponse.text();
+
+    // Parse <text> elements from the XML (no DOMParser in service workers)
+    const segments = [];
+    const textRegex = /<text[^>]*>([\s\S]*?)<\/text>/g;
+    let match;
+    while ((match = textRegex.exec(captionXml)) !== null) {
+      const text = decodeHtmlEntities(match[1]).replace(/\n/g, ' ').trim();
+      if (text) segments.push(text);
+    }
+
+    const fullText = segments.join(' ').replace(/\s+/g, ' ').trim();
+
+    if (!fullText) {
+      return { success: false, error: 'Transcript was empty' };
+    }
+
+    return {
+      success: true,
+      text: fullText,
+      metadata: {
+        title,
+        channel,
+        duration,
+        videoId,
+        language: bestTrack.languageCode || 'unknown',
+        captionType: bestTrack.kind === 'asr' ? 'auto-generated' : 'manual',
+      },
+      wordCount: fullText.split(/\s+/).filter(Boolean).length,
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Decode HTML entities found in YouTube caption XML.
+ */
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&#x2F;/g, '/')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)));
 }
 
 /**

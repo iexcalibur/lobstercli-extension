@@ -142,11 +142,10 @@ function resetChat() {
     <div class="welcome-sub">How can I help you today?</div>
     <div class="suggestions" id="suggestions">
       <button class="suggestion-chip" data-action="summary">Summarize this page</button>
-      <button class="suggestion-chip" data-action="extract">Extract as Markdown</button>
-      <button class="suggestion-chip" data-action="forms">Detect all forms</button>
-      <button class="suggestion-chip" data-action="links">Show key links</button>
-      <button class="suggestion-chip" data-action="network">Monitor API calls</button>
-      <button class="suggestion-chip" data-action="snapshot">DOM snapshot</button>
+      <button class="suggestion-chip" data-action="keypoints">What are the key points?</button>
+      <button class="suggestion-chip" data-action="explain">Explain this simply</button>
+      <button class="suggestion-chip" data-action="videosummary">What's happening in this video?</button>
+      <button class="suggestion-chip" data-action="draft">Help me draft a reply</button>
       <button class="suggestion-chip" data-action="vision">What's on screen?</button>
     </div>
   `;
@@ -291,12 +290,15 @@ async function handleAction(action) {
     startChat();
     const labels = {
       summary: 'Summarize this page',
-      extract: 'Extract as Markdown',
+      keypoints: 'What are the key points?',
+      explain: 'Explain this simply',
+      videosummary: 'What\'s happening in this video?',
+      draft: 'Help me draft a reply',
+      vision: 'What\'s on screen right now?',
       forms: 'Detect all forms',
       links: 'Show key links',
       network: 'Monitor API calls',
       snapshot: 'DOM snapshot',
-      vision: 'What\'s on screen right now?',
     };
     addUserMessage(labels[action] || action);
     showTyping();
@@ -304,6 +306,10 @@ async function handleAction(action) {
 
   switch (action) {
     case 'summary': return await doSummary();
+    case 'keypoints': return await handleSmartQuestion('What are the key points and main takeaways from this page? List them as concise bullet points.');
+    case 'explain': return await handleSmartQuestion('Explain the content of this page in simple, easy to understand terms. Avoid jargon and break down complex ideas.');
+    case 'videosummary': return await handleSmartQuestion('What is happening in this video? Give me a detailed summary of the video content, the main topics discussed, and any key moments.');
+    case 'draft': return await handleSmartQuestion('Based on the content of this page, help me draft a thoughtful reply or response. Suggest what key points to address.');
     case 'extract': return await doExtract();
     case 'forms': return await doForms();
     case 'links': return await doLinks();
@@ -563,8 +569,9 @@ async function handleSmartQuestion(question) {
         pdfResult.text.slice(0, 15000);
 
       // Remove the "extracting" message
-      const msgs = document.getElementById('messages');
-      if (msgs.lastChild) msgs.removeChild(msgs.lastChild);
+      const chatArea = document.getElementById('chat-area');
+      const lastMsg = chatArea.querySelector('.message-bot:last-child');
+      if (lastMsg) lastMsg.remove();
 
       // Send to AI with PDF content
       const response = await chrome.runtime.sendMessage({
@@ -582,6 +589,52 @@ async function handleSmartQuestion(question) {
         addBotMessage(formatAIResponse(response.answer));
       }
       return;
+    }
+
+    // ── YouTube Detection: extract transcript for YouTube videos ──
+    const videoId = extractYoutubeVideoId(currentTab.url);
+    if (videoId) {
+      addBotMessage('<span class="badge badge-red">YouTube</span> Extracting transcript...');
+
+      const ytResult = await chrome.runtime.sendMessage({
+        action: 'extractYoutubeTranscript',
+        url: currentTab.url,
+        videoId,
+      });
+
+      if (ytResult.success) {
+        const ytContext = `[YouTube Video: ${ytResult.metadata.title}]\n` +
+          `Channel: ${ytResult.metadata.channel} | Duration: ${ytResult.metadata.duration}\n` +
+          `Language: ${ytResult.metadata.language}${ytResult.metadata.captionType === 'auto-generated' ? ' (auto-generated)' : ''}\n` +
+          `Words: ${ytResult.wordCount}\n\n` +
+          `Transcript:\n${ytResult.text.slice(0, 15000)}`;
+
+        // Remove the "extracting" status message
+        const chatArea = document.getElementById('chat-area');
+        const lastMsg = chatArea.querySelector('.message-bot:last-child');
+        if (lastMsg) lastMsg.remove();
+
+        const response = await chrome.runtime.sendMessage({
+          action: 'askAI',
+          prompt: question,
+          pageContent: ytContext,
+          pageUrl: currentTab.url,
+          pageTitle: ytResult.metadata.title,
+          screenshot: null,
+        });
+
+        if (response.error) {
+          addBotMessage('Error: ' + escapeHtml(response.error));
+        } else {
+          addBotMessage(formatAIResponse(response.answer));
+        }
+        return;
+      }
+
+      // Transcript unavailable — remove status message and fall through to normal page flow
+      const chatArea = document.getElementById('chat-area');
+      const lastMsg = chatArea.querySelector('.message-bot:last-child');
+      if (lastMsg) lastMsg.remove();
     }
 
     // ── Normal page flow ──
@@ -732,4 +785,10 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+function extractYoutubeVideoId(url) {
+  if (!url) return null;
+  const match = url.match(/(?:youtube\.com\/(?:watch\?.*v=|embed\/|shorts\/|v\/)|youtu\.be\/)([\w-]{11})/);
+  return match?.[1] || null;
 }
