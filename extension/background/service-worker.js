@@ -384,11 +384,43 @@ async function handleExtractPdf({ url }) {
 
 /**
  * Extract transcript from a YouTube video.
- * Receives caption tracks (already extracted from the page by the popup),
- * fetches the caption XML, and parses it into plain text.
+ * Uses YouTube's innertube API to get caption tracks, then fetches
+ * and parses the caption XML into plain text.
  */
-async function handleExtractYoutubeTranscript({ captionTracks, title, channel, duration }) {
+async function handleExtractYoutubeTranscript({ videoId }) {
   try {
+    // Step 1: Call YouTube's innertube player API to get video info + captions
+    const playerResponse = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        videoId,
+        context: {
+          client: {
+            clientName: 'WEB',
+            clientVersion: '2.20240101.00.00',
+            hl: 'en',
+          },
+        },
+      }),
+    });
+
+    const playerData = await playerResponse.json();
+
+    // Extract video metadata
+    const videoDetails = playerData.videoDetails || {};
+    const title = videoDetails.title || 'Unknown';
+    const channel = videoDetails.author || 'Unknown';
+    const lengthSeconds = parseInt(videoDetails.lengthSeconds || '0', 10);
+    const mins = Math.floor(lengthSeconds / 60);
+    const secs = lengthSeconds % 60;
+    const formattedDuration = `${mins}:${String(secs).padStart(2, '0')}`;
+
+    // Get caption tracks
+    const captionTracks = playerData.captions
+      ?.playerCaptionsTracklistRenderer
+      ?.captionTracks;
+
     if (!captionTracks || captionTracks.length === 0) {
       return { success: false, error: 'No captions available for this video' };
     }
@@ -404,7 +436,7 @@ async function handleExtractYoutubeTranscript({ captionTracks, title, channel, d
       return { success: false, error: 'No usable caption track found' };
     }
 
-    // Fetch caption XML
+    // Step 2: Fetch caption XML
     const captionResponse = await fetch(bestTrack.baseUrl);
     const captionXml = await captionResponse.text();
 
@@ -423,18 +455,12 @@ async function handleExtractYoutubeTranscript({ captionTracks, title, channel, d
       return { success: false, error: 'Transcript was empty' };
     }
 
-    // Format duration
-    const lengthSeconds = parseInt(duration || '0', 10);
-    const mins = Math.floor(lengthSeconds / 60);
-    const secs = lengthSeconds % 60;
-    const formattedDuration = `${mins}:${String(secs).padStart(2, '0')}`;
-
     return {
       success: true,
       text: fullText,
       metadata: {
-        title: title || 'Unknown',
-        channel: channel || 'Unknown',
+        title,
+        channel,
         duration: formattedDuration,
         language: bestTrack.languageCode || 'unknown',
         captionType: bestTrack.kind === 'asr' ? 'auto-generated' : 'manual',

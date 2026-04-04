@@ -596,96 +596,38 @@ async function handleSmartQuestion(question) {
     if (videoId) {
       addBotMessage('<span class="badge badge-red">YouTube</span> Extracting transcript...');
 
-      // Step 1: Extract caption track URLs from the already-loaded YouTube page
-      const captionData = await execInPage(() => {
-        try {
-          // Try window variable first (sometimes still available)
-          if (window.ytInitialPlayerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
-            const pr = window.ytInitialPlayerResponse;
-            return {
-              tracks: pr.captions.playerCaptionsTracklistRenderer.captionTracks,
-              title: pr.videoDetails?.title,
-              channel: pr.videoDetails?.author,
-              duration: pr.videoDetails?.lengthSeconds,
-            };
-          }
-
-          // Fallback: search script tags for captionTracks
-          const scripts = document.querySelectorAll('script');
-          for (const script of scripts) {
-            const text = script.textContent;
-            if (!text || !text.includes('captionTracks')) continue;
-
-            // Extract captionTracks array using bracket counting
-            const marker = '"captionTracks":';
-            const idx = text.indexOf(marker);
-            if (idx === -1) continue;
-
-            const arrStart = text.indexOf('[', idx);
-            if (arrStart === -1) continue;
-
-            let depth = 0;
-            for (let i = arrStart; i < text.length; i++) {
-              if (text[i] === '[') depth++;
-              if (text[i] === ']') depth--;
-              if (depth === 0) {
-                const tracks = JSON.parse(text.slice(arrStart, i + 1));
-
-                // Also extract video details
-                let title = null, channel = null, duration = null;
-                const titleMatch = text.match(/"title":"((?:[^"\\]|\\.)*)"/);
-                const channelMatch = text.match(/"author":"((?:[^"\\]|\\.)*)"/);
-                const durationMatch = text.match(/"lengthSeconds":"(\d+)"/);
-                if (titleMatch) title = JSON.parse('"' + titleMatch[1] + '"');
-                if (channelMatch) channel = JSON.parse('"' + channelMatch[1] + '"');
-                if (durationMatch) duration = durationMatch[1];
-
-                return { tracks, title, channel, duration };
-              }
-            }
-          }
-        } catch {}
-        return null;
+      const ytResult = await chrome.runtime.sendMessage({
+        action: 'extractYoutubeTranscript',
+        videoId,
       });
 
-      if (captionData?.tracks?.length > 0) {
-        // Step 2: Send caption track URL to service worker to fetch transcript
-        const ytResult = await chrome.runtime.sendMessage({
-          action: 'extractYoutubeTranscript',
-          captionTracks: captionData.tracks,
-          title: captionData.title || currentTab.title?.replace(/ - YouTube$/, '') || 'Unknown',
-          channel: captionData.channel || 'Unknown',
-          duration: captionData.duration || '0',
+      if (ytResult.success) {
+        const ytContext = `[YouTube Video: ${ytResult.metadata.title}]\n` +
+          `Channel: ${ytResult.metadata.channel} | Duration: ${ytResult.metadata.duration}\n` +
+          `Language: ${ytResult.metadata.language}${ytResult.metadata.captionType === 'auto-generated' ? ' (auto-generated)' : ''}\n` +
+          `Words: ${ytResult.wordCount}\n\n` +
+          `Transcript:\n${ytResult.text.slice(0, 15000)}`;
+
+        // Remove the "extracting" status message
+        const chatArea = document.getElementById('chat-area');
+        const lastMsg = chatArea.querySelector('.message-bot:last-child');
+        if (lastMsg) lastMsg.remove();
+
+        const response = await chrome.runtime.sendMessage({
+          action: 'askAI',
+          prompt: question,
+          pageContent: ytContext,
+          pageUrl: currentTab.url,
+          pageTitle: ytResult.metadata.title,
+          screenshot: null,
         });
 
-        if (ytResult.success) {
-          const ytContext = `[YouTube Video: ${ytResult.metadata.title}]\n` +
-            `Channel: ${ytResult.metadata.channel} | Duration: ${ytResult.metadata.duration}\n` +
-            `Language: ${ytResult.metadata.language}${ytResult.metadata.captionType === 'auto-generated' ? ' (auto-generated)' : ''}\n` +
-            `Words: ${ytResult.wordCount}\n\n` +
-            `Transcript:\n${ytResult.text.slice(0, 15000)}`;
-
-          // Remove the "extracting" status message
-          const chatArea = document.getElementById('chat-area');
-          const lastMsg = chatArea.querySelector('.message-bot:last-child');
-          if (lastMsg) lastMsg.remove();
-
-          const response = await chrome.runtime.sendMessage({
-            action: 'askAI',
-            prompt: question,
-            pageContent: ytContext,
-            pageUrl: currentTab.url,
-            pageTitle: ytResult.metadata.title,
-            screenshot: null,
-          });
-
-          if (response.error) {
-            addBotMessage('Error: ' + escapeHtml(response.error));
-          } else {
-            addBotMessage(formatAIResponse(response.answer));
-          }
-          return;
+        if (response.error) {
+          addBotMessage('Error: ' + escapeHtml(response.error));
+        } else {
+          addBotMessage(formatAIResponse(response.answer));
         }
+        return;
       }
 
       // Transcript unavailable — remove status message and fall through to normal page flow
