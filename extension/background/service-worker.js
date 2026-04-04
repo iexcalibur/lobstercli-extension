@@ -384,49 +384,11 @@ async function handleExtractPdf({ url }) {
 
 /**
  * Extract transcript from a YouTube video.
- * Fetches the watch page HTML, extracts caption track URLs,
- * then fetches and parses the caption XML into plain text.
+ * Receives caption tracks (already extracted from the page by the popup),
+ * fetches the caption XML, and parses it into plain text.
  */
-async function handleExtractYoutubeTranscript({ url, videoId }) {
+async function handleExtractYoutubeTranscript({ captionTracks, title, channel, duration }) {
   try {
-    // Fetch the YouTube watch page
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-    });
-    const html = await response.text();
-
-    // Extract ytInitialPlayerResponse from the page HTML
-    const playerMatch = html.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;\s*var/s)
-      || html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s);
-
-    if (!playerMatch) {
-      return { success: false, error: 'Could not extract player data from this page' };
-    }
-
-    let playerResponse;
-    try {
-      playerResponse = JSON.parse(playerMatch[1]);
-    } catch {
-      return { success: false, error: 'Failed to parse player data' };
-    }
-
-    // Extract video metadata
-    const videoDetails = playerResponse.videoDetails || {};
-    const title = videoDetails.title || 'Unknown';
-    const channel = videoDetails.author || 'Unknown';
-    const lengthSeconds = parseInt(videoDetails.lengthSeconds || '0', 10);
-    const minutes = Math.floor(lengthSeconds / 60);
-    const seconds = lengthSeconds % 60;
-    const duration = `${minutes}:${String(seconds).padStart(2, '0')}`;
-
-    // Get caption tracks
-    const captionTracks = playerResponse.captions
-      ?.playerCaptionsTracklistRenderer
-      ?.captionTracks;
-
     if (!captionTracks || captionTracks.length === 0) {
       return { success: false, error: 'No captions available for this video' };
     }
@@ -461,14 +423,19 @@ async function handleExtractYoutubeTranscript({ url, videoId }) {
       return { success: false, error: 'Transcript was empty' };
     }
 
+    // Format duration
+    const lengthSeconds = parseInt(duration || '0', 10);
+    const mins = Math.floor(lengthSeconds / 60);
+    const secs = lengthSeconds % 60;
+    const formattedDuration = `${mins}:${String(secs).padStart(2, '0')}`;
+
     return {
       success: true,
       text: fullText,
       metadata: {
-        title,
-        channel,
-        duration,
-        videoId,
+        title: title || 'Unknown',
+        channel: channel || 'Unknown',
+        duration: formattedDuration,
         language: bestTrack.languageCode || 'unknown',
         captionType: bestTrack.kind === 'asr' ? 'auto-generated' : 'manual',
       },
