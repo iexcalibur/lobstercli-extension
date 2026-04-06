@@ -6,7 +6,10 @@ let currentTab = null;
 let aiConfig = null;
 let chatStarted = false;
 let interceptorActive = false;
+let formObserverActive = false;
+let formPollInterval = null;
 let pageAccessible = false;
+let isProcessing = false;
 
 async function loadAiConfig() {
   const stored = await chrome.storage.local.get(['aiProvider', 'aiApiKey', 'aiModel', 'aiBaseURL']);
@@ -37,6 +40,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Catch both full page loads AND in-page URL changes (SPA, pushState, hash)
       if (changeInfo.status === 'complete' || changeInfo.url) {
         await refreshCurrentTab();
+        if (formObserverActive) stopFormPolling();
       }
     }
   });
@@ -93,13 +97,8 @@ async function refreshCurrentTab() {
   }
 }
 
-function enableSuggestions() {
-  document.querySelectorAll('.suggestion-chip').forEach(c => c.disabled = false);
-}
-
-function disableSuggestions() {
-  document.querySelectorAll('.suggestion-chip').forEach(c => c.disabled = true);
-}
+function enableSuggestions() {}
+function disableSuggestions() {}
 
 function setupListeners() {
   document.getElementById('btn-settings').addEventListener('click', () => chrome.runtime.openOptionsPage());
@@ -118,10 +117,6 @@ function setupListeners() {
     e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
   });
 
-  document.querySelectorAll('.suggestion-chip').forEach(chip => {
-    chip.addEventListener('click', () => handleAction(chip.dataset.action));
-  });
-
   document.getElementById('context-close').addEventListener('click', () => {
     document.getElementById('context-bar').style.display = 'none';
   });
@@ -131,6 +126,12 @@ function setupListeners() {
 function resetChat() {
   chatStarted = false;
   interceptorActive = false;
+  stopFormPolling();
+  if (currentTab?.id && pageAccessible) {
+    execInPage(() => {
+      if (typeof lobsterDisconnectFormObserver === 'function') lobsterDisconnectFormObserver();
+    }).catch(() => {});
+  }
   const chatArea = document.getElementById('chat-area');
   chatArea.innerHTML = '';
 
@@ -140,20 +141,16 @@ function resetChat() {
   welcome.innerHTML = `
     <div class="welcome-greeting">Hello!</div>
     <div class="welcome-sub">How can I help you today?</div>
-    <div class="suggestions" id="suggestions">
-      <button class="suggestion-chip" data-action="summary">Summarize this page</button>
-      <button class="suggestion-chip" data-action="keypoints">What are the key points?</button>
-      <button class="suggestion-chip" data-action="explain">Explain this simply</button>
-      <button class="suggestion-chip" data-action="videosummary">What's happening in this video?</button>
-      <button class="suggestion-chip" data-action="draft">Help me draft a reply</button>
-      <button class="suggestion-chip" data-action="vision">What's on screen?</button>
+    <div class="examples" id="examples">
+      <div class="examples-label">Try asking</div>
+      <span class="example-item">"Summarize this page"</span>
+      <span class="example-item">"What are the key points?"</span>
+      <span class="example-item">"Explain this simply"</span>
+      <span class="example-item">"What's happening in this video?"</span>
+      <span class="example-item">"Help me draft a reply"</span>
     </div>
   `;
   chatArea.appendChild(welcome);
-
-  welcome.querySelectorAll('.suggestion-chip').forEach(chip => {
-    chip.addEventListener('click', () => handleAction(chip.dataset.action));
-  });
 
   document.getElementById('chat-input').value = '';
   document.getElementById('chat-input').style.height = 'auto';
@@ -235,11 +232,62 @@ function scrollToBottom() {
   chatArea.scrollTop = chatArea.scrollHeight;
 }
 
+// ── Form Observer Polling ──
+function startFormPolling() {
+  if (formPollInterval) return;
+  formPollInterval = setInterval(async () => {
+    if (!formObserverActive || !currentTab?.id || !pageAccessible) return;
+    try {
+      const changes = await execInPage(() => lobsterGetFormChanges());
+      if (changes && changes.length > 0) {
+        for (const change of changes) {
+          renderFormChange(change);
+        }
+      }
+    } catch {
+      stopFormPolling();
+    }
+  }, 1500);
+}
+
+function stopFormPolling() {
+  if (formPollInterval) {
+    clearInterval(formPollInterval);
+    formPollInterval = null;
+  }
+  formObserverActive = false;
+}
+
+function renderFormChange(change) {
+  let html = '<div class="badge-row">';
+  html += '<span class="badge badge-green">FORM UPDATE</span>';
+  html += `<span class="badge badge-blue">${change.newFields.length} new field(s)</span>`;
+  if (change.removedCount > 0) {
+    html += `<span class="badge badge-red">${change.removedCount} removed</span>`;
+  }
+  html += '</div>';
+
+  if (change.newFields.length > 0) {
+    html += '<h3>New fields detected</h3>';
+    html += '<div class="form-card">';
+    for (const field of change.newFields) {
+      html += '<div class="form-field">';
+      html += `<span class="field-type">${field.type}</span>`;
+      html += `<span class="field-label">${escapeHtml(field.label || field.name || 'unnamed')}</span>`;
+      if (field.required) html += '<span class="field-required">req</span>';
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  addBotMessage(html);
+}
+
 // ── Send Message ──
 async function handleSend() {
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
-  if (!text) return;
+  if (!text || isProcessing) return;
 
   input.value = '';
   input.style.height = 'auto';
@@ -277,6 +325,8 @@ async function handleSend() {
 
 // ── Actions ──
 async function handleAction(action) {
+  if (isProcessing) return;
+
   if (!pageAccessible) {
     if (!chatStarted) {
       startChat();
@@ -455,6 +505,16 @@ async function doForms() {
     }
 
     addBotMessage(html);
+
+    // Install form observer for live change detection
+    if (!formObserverActive) {
+      try {
+        await chrome.scripting.executeScript({ target: { tabId: currentTab.id }, files: ['shared/form-observer.js'] });
+        await execInPage(() => lobsterInstallFormObserver());
+        formObserverActive = true;
+        startFormPolling();
+      } catch {}
+    }
   } catch (err) {
     addBotMessage('Error scanning forms: ' + escapeHtml(err.message));
   }
@@ -543,6 +603,9 @@ async function handleSmartQuestion(question) {
     return;
   }
 
+  isProcessing = true;
+  disableSuggestions();
+
   try {
     // ── PDF Detection: if current page is a PDF, extract via background worker ──
     const isPdf = currentTab.url?.toLowerCase().endsWith('.pdf') ||
@@ -594,46 +657,75 @@ async function handleSmartQuestion(question) {
     // ── YouTube Detection: extract transcript for YouTube videos ──
     const videoId = extractYoutubeVideoId(currentTab.url);
     if (videoId) {
-      addBotMessage('<span class="badge badge-red">YouTube</span> Extracting transcript...');
-
-      const ytResult = await chrome.runtime.sendMessage({
-        action: 'extractYoutubeTranscript',
-        videoId,
+      // Extract caption data directly from the YouTube page's JS context
+      const ytData = await execInPage(() => {
+        try {
+          const player = window.ytInitialPlayerResponse;
+          if (!player) return null;
+          const details = player.videoDetails || {};
+          const tracks = player.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+          return {
+            title: details.title || '',
+            channel: details.author || '',
+            lengthSeconds: details.lengthSeconds || '0',
+            captionTracks: tracks.map(t => ({
+              baseUrl: t.baseUrl,
+              languageCode: t.languageCode,
+              kind: t.kind,
+            })),
+          };
+        } catch { return null; }
       });
 
-      if (ytResult.success) {
-        const ytContext = `[YouTube Video: ${ytResult.metadata.title}]\n` +
-          `Channel: ${ytResult.metadata.channel} | Duration: ${ytResult.metadata.duration}\n` +
-          `Language: ${ytResult.metadata.language}${ytResult.metadata.captionType === 'auto-generated' ? ' (auto-generated)' : ''}\n` +
-          `Words: ${ytResult.wordCount}\n\n` +
-          `Transcript:\n${ytResult.text.slice(0, 15000)}`;
+      if (ytData && ytData.captionTracks.length > 0) {
+        // Pick best track: manual English > auto English > manual any > first
+        const tracks = ytData.captionTracks;
+        const bestTrack =
+          tracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr') ||
+          tracks.find(t => t.languageCode?.startsWith('en')) ||
+          tracks.find(t => t.kind !== 'asr') ||
+          tracks[0];
 
-        // Remove the "extracting" status message
-        const chatArea = document.getElementById('chat-area');
-        const lastMsg = chatArea.querySelector('.message-bot:last-child');
-        if (lastMsg) lastMsg.remove();
+        if (bestTrack?.baseUrl) {
+          const ytResult = await chrome.runtime.sendMessage({
+            action: 'extractYoutubeTranscript',
+            captionUrl: bestTrack.baseUrl,
+            metadata: {
+              title: ytData.title,
+              channel: ytData.channel,
+              lengthSeconds: ytData.lengthSeconds,
+              language: bestTrack.languageCode || 'unknown',
+              captionType: bestTrack.kind === 'asr' ? 'auto-generated' : 'manual',
+            },
+          });
 
-        const response = await chrome.runtime.sendMessage({
-          action: 'askAI',
-          prompt: question,
-          pageContent: ytContext,
-          pageUrl: currentTab.url,
-          pageTitle: ytResult.metadata.title,
-          screenshot: null,
-        });
+          if (ytResult.success) {
+            const ytContext = `[YouTube Video: ${ytResult.metadata.title}]\n` +
+              `Channel: ${ytResult.metadata.channel} | Duration: ${ytResult.metadata.duration}\n` +
+              `Language: ${ytResult.metadata.language}${ytResult.metadata.captionType === 'auto-generated' ? ' (auto-generated)' : ''}\n` +
+              `Words: ${ytResult.wordCount}\n\n` +
+              `Transcript:\n${ytResult.text.slice(0, 15000)}`;
 
-        if (response.error) {
-          addBotMessage('Error: ' + escapeHtml(response.error));
-        } else {
-          addBotMessage(formatAIResponse(response.answer));
+            const response = await chrome.runtime.sendMessage({
+              action: 'askAI',
+              prompt: question,
+              pageContent: ytContext,
+              pageUrl: currentTab.url,
+              pageTitle: ytResult.metadata.title,
+              screenshot: null,
+            });
+
+            if (response.error) {
+              addBotMessage('Error: ' + escapeHtml(response.error));
+            } else {
+              addBotMessage(formatAIResponse(response.answer));
+            }
+            return;
+          }
         }
-        return;
       }
 
-      // Transcript unavailable — remove status message and fall through to normal page flow
-      const chatArea = document.getElementById('chat-area');
-      const lastMsg = chatArea.querySelector('.message-bot:last-child');
-      if (lastMsg) lastMsg.remove();
+      // Transcript unavailable — silently fall through to page content
     }
 
     // ── Normal page flow ──
@@ -671,8 +763,30 @@ async function handleSmartQuestion(question) {
     if (brain.forms) {
       await chrome.scripting.executeScript({ target: { tabId: currentTab.id }, files: ['shared/form-state.js'] });
       formData = await execInPage(() => lobsterFormState());
+
+      // Drain any pending observer changes for AI context
+      let recentChanges = null;
+      if (formObserverActive) {
+        recentChanges = await execInPage(() => lobsterGetFormChanges());
+      }
+
       if (formData) {
         pageContent += '\n\n--- FORM DATA ---\n' + JSON.stringify(formData, null, 2);
+        if (recentChanges && recentChanges.length > 0) {
+          pageContent += '\n\n--- RECENT FORM CHANGES ---\n' +
+            'Note: The following fields appeared dynamically after the initial page load.\n' +
+            JSON.stringify(recentChanges.map(c => ({ newFields: c.newFields, removedCount: c.removedCount, timestamp: c.timestamp })), null, 2);
+        }
+      }
+
+      // Install observer if not yet active
+      if (!formObserverActive) {
+        try {
+          await chrome.scripting.executeScript({ target: { tabId: currentTab.id }, files: ['shared/form-observer.js'] });
+          await execInPage(() => lobsterInstallFormObserver());
+          formObserverActive = true;
+          startFormPolling();
+        } catch {}
       }
     }
 
@@ -693,6 +807,9 @@ async function handleSmartQuestion(question) {
     }
   } catch (err) {
     addBotMessage('Error: ' + escapeHtml(err.message));
+  } finally {
+    isProcessing = false;
+    enableSuggestions();
   }
 }
 

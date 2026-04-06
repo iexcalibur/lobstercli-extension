@@ -387,57 +387,10 @@ async function handleExtractPdf({ url }) {
  * Uses YouTube's innertube API to get caption tracks, then fetches
  * and parses the caption XML into plain text.
  */
-async function handleExtractYoutubeTranscript({ videoId }) {
+async function handleExtractYoutubeTranscript({ captionUrl, metadata }) {
   try {
-    // Step 1: Call YouTube's innertube player API to get video info + captions
-    const playerResponse = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        videoId,
-        context: {
-          client: {
-            clientName: 'WEB',
-            clientVersion: '2.20240101.00.00',
-            hl: 'en',
-          },
-        },
-      }),
-    });
-
-    const playerData = await playerResponse.json();
-
-    // Extract video metadata
-    const videoDetails = playerData.videoDetails || {};
-    const title = videoDetails.title || 'Unknown';
-    const channel = videoDetails.author || 'Unknown';
-    const lengthSeconds = parseInt(videoDetails.lengthSeconds || '0', 10);
-    const mins = Math.floor(lengthSeconds / 60);
-    const secs = lengthSeconds % 60;
-    const formattedDuration = `${mins}:${String(secs).padStart(2, '0')}`;
-
-    // Get caption tracks
-    const captionTracks = playerData.captions
-      ?.playerCaptionsTracklistRenderer
-      ?.captionTracks;
-
-    if (!captionTracks || captionTracks.length === 0) {
-      return { success: false, error: 'No captions available for this video' };
-    }
-
-    // Pick best track: manual English > auto English > manual any > first
-    const bestTrack =
-      captionTracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr') ||
-      captionTracks.find(t => t.languageCode?.startsWith('en')) ||
-      captionTracks.find(t => t.kind !== 'asr') ||
-      captionTracks[0];
-
-    if (!bestTrack?.baseUrl) {
-      return { success: false, error: 'No usable caption track found' };
-    }
-
-    // Step 2: Fetch caption XML
-    const captionResponse = await fetch(bestTrack.baseUrl);
+    // Fetch caption XML (URL already contains auth tokens from the page)
+    const captionResponse = await fetch(captionUrl);
     const captionXml = await captionResponse.text();
 
     // Parse <text> elements from the XML (no DOMParser in service workers)
@@ -455,15 +408,19 @@ async function handleExtractYoutubeTranscript({ videoId }) {
       return { success: false, error: 'Transcript was empty' };
     }
 
+    const lengthSeconds = parseInt(metadata.lengthSeconds || '0', 10);
+    const mins = Math.floor(lengthSeconds / 60);
+    const secs = lengthSeconds % 60;
+
     return {
       success: true,
       text: fullText,
       metadata: {
-        title,
-        channel,
-        duration: formattedDuration,
-        language: bestTrack.languageCode || 'unknown',
-        captionType: bestTrack.kind === 'asr' ? 'auto-generated' : 'manual',
+        title: metadata.title || 'Unknown',
+        channel: metadata.channel || 'Unknown',
+        duration: `${mins}:${String(secs).padStart(2, '0')}`,
+        language: metadata.language || 'unknown',
+        captionType: metadata.captionType || 'unknown',
       },
       wordCount: fullText.split(/\s+/).filter(Boolean).length,
     };
