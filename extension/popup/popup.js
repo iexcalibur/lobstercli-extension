@@ -654,78 +654,218 @@ async function handleSmartQuestion(question) {
       return;
     }
 
-    // ── YouTube Detection: extract transcript for YouTube videos ──
+    // ── YouTube Detection: extract transcript with SAPISIDHASH auth ──
     const videoId = extractYoutubeVideoId(currentTab.url);
     if (videoId) {
-      // Extract caption data directly from the YouTube page's JS context
-      const ytData = await execInPage(() => {
-        try {
-          const player = window.ytInitialPlayerResponse;
-          if (!player) return null;
-          const details = player.videoDetails || {};
-          const tracks = player.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-          return {
-            title: details.title || '',
-            channel: details.author || '',
-            lengthSeconds: details.lengthSeconds || '0',
-            captionTracks: tracks.map(t => ({
-              baseUrl: t.baseUrl,
-              languageCode: t.languageCode,
-              kind: t.kind,
-            })),
-          };
-        } catch { return null; }
-      });
+      console.log('[LobsterCLI] YouTube detected, videoId:', videoId);
+      let ytResult = null;
 
-      if (ytData && ytData.captionTracks.length > 0) {
-        // Pick best track: manual English > auto English > manual any > first
-        const tracks = ytData.captionTracks;
-        const bestTrack =
-          tracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr') ||
-          tracks.find(t => t.languageCode?.startsWith('en')) ||
-          tracks.find(t => t.kind !== 'asr') ||
-          tracks[0];
+      // Strategy 1: MAIN world — full extraction with authenticated caption fetch.
+      // YouTube requires SAPISIDHASH auth for both innertube API and timedtext URLs.
+      // We do everything inside the page context where we have cookies + crypto.subtle.
+      try {
+        const injectionResults = await chrome.scripting.executeScript({
+          target: { tabId: currentTab.id },
+          world: 'MAIN',
+          func: async () => {
+            try {
+              // ── Helper: generate SAPISIDHASH auth header ──
+              async function generateSAPISIDHASH() {
+                const cookies = document.cookie.split(';').map(c => c.trim());
+                const sapisidCookie = cookies.find(c => c.startsWith('SAPISID='))
+                  || cookies.find(c => c.startsWith('__Secure-3PAPISID='));
+                if (!sapisidCookie) return null;
+                const sapisid = sapisidCookie.split('=')[1];
+                const timestamp = Math.floor(Date.now() / 1000);
+                const origin = 'https://www.youtube.com';
+                const msgBuffer = new TextEncoder().encode(`${timestamp} ${sapisid} ${origin}`);
+                const hashBuffer = await crypto.subtle.digest('SHA-1', msgBuffer);
+                const hashHex = Array.from(new Uint8Array(hashBuffer))
+                  .map(b => b.toString(16).padStart(2, '0')).join('');
+                return `SAPISIDHASH ${timestamp}_${hashHex}`;
+              }
 
-        if (bestTrack?.baseUrl) {
-          const ytResult = await chrome.runtime.sendMessage({
-            action: 'extractYoutubeTranscript',
-            captionUrl: bestTrack.baseUrl,
-            metadata: {
-              title: ytData.title,
-              channel: ytData.channel,
-              lengthSeconds: ytData.lengthSeconds,
-              language: bestTrack.languageCode || 'unknown',
-              captionType: bestTrack.kind === 'asr' ? 'auto-generated' : 'manual',
-            },
-          });
+              // ── Helper: decode HTML entities in caption XML ──
+              function decodeEntities(str) {
+                return str
+                  .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+                  .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'")
+                  .replace(/&#x2F;/g, '/').replace(/&apos;/g, "'")
+                  .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)));
+              }
 
-          if (ytResult.success) {
-            const ytContext = `[YouTube Video: ${ytResult.metadata.title}]\n` +
-              `Channel: ${ytResult.metadata.channel} | Duration: ${ytResult.metadata.duration}\n` +
-              `Language: ${ytResult.metadata.language}${ytResult.metadata.captionType === 'auto-generated' ? ' (auto-generated)' : ''}\n` +
-              `Words: ${ytResult.wordCount}\n\n` +
-              `Transcript:\n${ytResult.text.slice(0, 15000)}`;
+              // ── Helper: fetch caption XML and parse to text ──
+              async function fetchCaptionText(captionUrl, authHeader) {
+                const headers = {};
+                if (authHeader) headers['Authorization'] = authHeader;
+                const resp = await fetch(captionUrl, { credentials: 'include', headers });
+                const xml = await resp.text();
+                if (!xml) return null;
+                const segments = [];
+                const regex = /<text[^>]*>([\s\S]*?)<\/text>/g;
+                let m;
+                while ((m = regex.exec(xml)) !== null) {
+                  const t = decodeEntities(m[1]).replace(/\n/g, ' ').trim();
+                  if (t) segments.push(t);
+                }
+                return segments.join(' ').replace(/\s+/g, ' ').trim();
+              }
 
-            const response = await chrome.runtime.sendMessage({
-              action: 'askAI',
-              prompt: question,
-              pageContent: ytContext,
-              pageUrl: currentTab.url,
-              pageTitle: ytResult.metadata.title,
-              screenshot: null,
-            });
+              // ── Step 1: Get video details from page JS globals ──
+              let playerResponse = null;
+              const moviePlayer = document.getElementById('movie_player');
+              if (moviePlayer && typeof moviePlayer.getPlayerResponse === 'function') {
+                playerResponse = moviePlayer.getPlayerResponse();
+              }
+              if (!playerResponse) playerResponse = window.ytInitialPlayerResponse;
 
-            if (response.error) {
-              addBotMessage('Error: ' + escapeHtml(response.error));
-            } else {
-              addBotMessage(formatAIResponse(response.answer));
+              const details = playerResponse?.videoDetails || {};
+              const videoId = details.videoId || '';
+              const title = details.title || '';
+              const channel = details.author || '';
+              const lengthSeconds = details.lengthSeconds || '0';
+
+              // ── Step 2: Generate auth header ──
+              const authHeader = await generateSAPISIDHASH();
+
+              // ── Step 3: Get caption tracks via innertube player API (with auth) ──
+              // The page-level playerResponse has tracks, but their URLs return empty
+              // without auth. Using innertube with auth gives fresh, working URLs.
+              const cfg = window.ytcfg?.data_ || {};
+              const apiKey = cfg.INNERTUBE_API_KEY;
+              const clientVersion = cfg.INNERTUBE_CLIENT_VERSION;
+              const visitorData = cfg.VISITOR_DATA;
+
+              const innertubeHeaders = { 'Content-Type': 'application/json' };
+              if (authHeader) innertubeHeaders['Authorization'] = authHeader;
+              if (visitorData) innertubeHeaders['X-Goog-Visitor-Id'] = visitorData;
+              innertubeHeaders['X-Youtube-Client-Name'] = '1';
+              innertubeHeaders['X-Youtube-Client-Version'] = clientVersion;
+
+              const playerResp = await fetch(
+                `https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`,
+                {
+                  method: 'POST',
+                  credentials: 'include',
+                  headers: innertubeHeaders,
+                  body: JSON.stringify({
+                    videoId: videoId || window.location.href.match(/[?&]v=([\w-]{11})/)?.[1],
+                    context: {
+                      client: { clientName: 'WEB', clientVersion, hl: 'en', visitorData },
+                    },
+                  }),
+                }
+              );
+              const playerData = await playerResp.json();
+              const tracks = playerData.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+
+              if (tracks.length === 0) {
+                return { error: 'No caption tracks available', title, channel };
+              }
+
+              // ── Step 4: Pick best track and fetch captions ──
+              const bestTrack =
+                tracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr') ||
+                tracks.find(t => t.languageCode?.startsWith('en')) ||
+                tracks.find(t => t.kind !== 'asr') ||
+                tracks[0];
+
+              if (!bestTrack?.baseUrl) {
+                return { error: 'No valid caption URL', title, channel };
+              }
+
+              const fullText = await fetchCaptionText(bestTrack.baseUrl, authHeader);
+              if (!fullText) {
+                return { error: 'Transcript was empty after fetch', title, channel };
+              }
+
+              const secs = parseInt(lengthSeconds, 10);
+              const mins = Math.floor(secs / 60);
+              const remSecs = secs % 60;
+
+              return {
+                success: true,
+                text: fullText,
+                metadata: {
+                  title: title || playerData.videoDetails?.title || 'Unknown',
+                  channel: channel || playerData.videoDetails?.author || 'Unknown',
+                  duration: `${mins}:${String(remSecs).padStart(2, '0')}`,
+                  language: bestTrack.languageCode || 'unknown',
+                  captionType: bestTrack.kind === 'asr' ? 'auto-generated' : 'manual',
+                },
+                wordCount: fullText.split(/\s+/).filter(Boolean).length,
+              };
+            } catch (e) {
+              return { error: e.message };
             }
-            return;
-          }
-        }
+          },
+        });
+
+        ytResult = injectionResults?.[0]?.result;
+        console.log('[LobsterCLI] Strategy 1 (MAIN world + auth):', ytResult?.success ? 'SUCCESS' : ytResult?.error);
+      } catch (err) {
+        console.log('[LobsterCLI] Strategy 1 exception:', err.message);
       }
 
-      // Transcript unavailable — silently fall through to page content
+      // Strategy 2: service worker fallback (for incognito / no cookies)
+      if (!ytResult?.success) {
+        console.log('[LobsterCLI] Trying Strategy 2 (service worker)...');
+        ytResult = await chrome.runtime.sendMessage({
+          action: 'extractYoutubeTranscriptById',
+          videoId,
+        });
+        console.log('[LobsterCLI] Strategy 2 result:', ytResult?.success ? 'SUCCESS' : ytResult?.error);
+      }
+
+      if (ytResult?.success) {
+        // If user is asking for the raw transcript, return it directly (bypasses AI copyright refusal)
+        const transcriptAsk = /\b(transcript|transcription|captions?|subtitles?)\b/i;
+        const fullAsk = /\b(full|entire|complete|whole|all|share|give|show|provide|copy|paste|raw|dump)\b/i;
+        if (transcriptAsk.test(question) && fullAsk.test(question)) {
+          const header = `<strong>${escapeHtml(ytResult.metadata.title)}</strong><br>` +
+            `Channel: ${escapeHtml(ytResult.metadata.channel)} | Duration: ${ytResult.metadata.duration}<br>` +
+            `Language: ${ytResult.metadata.language}${ytResult.metadata.captionType === 'auto-generated' ? ' (auto-generated)' : ''}<br>` +
+            `Words: ${ytResult.wordCount}<br><br>`;
+          addBotMessage(header + '<pre style="white-space:pre-wrap;max-height:400px;overflow-y:auto;">' + escapeHtml(ytResult.text.slice(0, 15000)) + '</pre>');
+          return;
+        }
+
+        const ytContext = `[YouTube Video: ${ytResult.metadata.title}]\n` +
+          `Channel: ${ytResult.metadata.channel} | Duration: ${ytResult.metadata.duration}\n` +
+          `Language: ${ytResult.metadata.language}${ytResult.metadata.captionType === 'auto-generated' ? ' (auto-generated)' : ''}\n` +
+          `Words: ${ytResult.wordCount}\n\n` +
+          `Transcript:\n${ytResult.text.slice(0, 15000)}`;
+
+        const response = await chrome.runtime.sendMessage({
+          action: 'askAI',
+          prompt: question,
+          pageContent: ytContext,
+          pageUrl: currentTab.url,
+          pageTitle: ytResult.metadata.title,
+          screenshot: null,
+          isTranscript: true,
+        });
+
+        if (response.error) {
+          addBotMessage('Error: ' + escapeHtml(response.error));
+        } else {
+          addBotMessage(formatAIResponse(response.answer));
+        }
+        return;
+      }
+
+      // Transcript extraction failed — check if user was asking for the transcript
+      const transcriptKeywords = /\b(transcript|transcription|captions?|subtitles?)\b/i;
+      if (transcriptKeywords.test(question)) {
+        const errorDetail = ytResult?.error || 'unknown error';
+        console.log('[LobsterCLI] YouTube transcript extraction failed:', errorDetail);
+        addBotMessage(`Could not extract the transcript for this video (${escapeHtml(errorDetail)}). The video may not have captions available, or YouTube may have blocked the request. Try refreshing the page and asking again.`);
+        return;
+      }
+
+      console.log('[LobsterCLI] YouTube transcript extraction failed for videoId:', videoId);
+      console.log('[LobsterCLI] Result:', JSON.stringify(ytResult));
+      // Fall through to page content for non-transcript questions
     }
 
     // ── Normal page flow ──

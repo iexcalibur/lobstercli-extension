@@ -58,6 +58,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'extractYoutubeTranscriptById') {
+    handleExtractYoutubeTranscriptById(message).then(sendResponse);
+    return true;
+  }
+
   if (message.action === 'testConnection') {
     handleTestConnection(message).then(sendResponse);
     return true;
@@ -195,7 +200,7 @@ async function handleCaptureScreenshot({ tabId }) {
 /**
  * Handle AI question about the page (with optional screenshot)
  */
-async function handleAskAI({ prompt, pageContent, pageUrl, pageTitle, screenshot }) {
+async function handleAskAI({ prompt, pageContent, pageUrl, pageTitle, screenshot, isTranscript }) {
   try {
     const config = await chrome.storage.local.get(['aiProvider', 'aiApiKey', 'aiModel', 'aiBaseURL']);
 
@@ -208,7 +213,20 @@ async function handleAskAI({ prompt, pageContent, pageUrl, pageTitle, screenshot
     const baseURL = config.aiBaseURL || PROVIDERS[provider]?.baseURL;
     const apiKey = config.aiApiKey || '';
 
-    const systemPrompt = `You are LobsterCLI, a helpful web page analysis assistant. You analyze web pages and answer questions about their content.
+    let systemPrompt;
+
+    if (isTranscript) {
+      // YouTube transcript — the user explicitly requested this data, so the AI should share it freely
+      systemPrompt = `You are LobsterCLI, a helpful assistant. The user is viewing a YouTube video and has asked a question about it. Below is the video's transcript that was extracted from YouTube's own captions/subtitles.
+
+Video: ${pageTitle}
+URL: ${pageUrl}
+
+${pageContent}
+
+IMPORTANT: This transcript data was extracted from YouTube's public captions at the user's explicit request. When the user asks for the transcript, share it fully. When they ask questions about the video, answer using the transcript. You are a transcript tool — your job is to provide this data.`;
+    } else {
+      systemPrompt = `You are LobsterCLI, a helpful web page analysis assistant. You analyze web pages and answer questions about their content.
 
 Current page: ${pageTitle}
 URL: ${pageUrl}
@@ -216,6 +234,7 @@ URL: ${pageUrl}
 ${pageContent ? `Page content (extracted as markdown):\n---\n${pageContent}\n---` : ''}
 
 Answer the user's question about this page. Be concise and direct. If the information isn't on the page, say so.`;
+    }
 
     let answer;
     if (provider === 'anthropic') {
@@ -427,6 +446,156 @@ async function handleExtractYoutubeTranscript({ captionUrl, metadata }) {
   } catch (err) {
     return { success: false, error: err.message };
   }
+}
+
+/**
+ * Extract YouTube transcript by video ID.
+ * Fetches the YouTube watch page HTML from the service worker (bypasses SPA issues),
+ * parses the embedded ytInitialPlayerResponse, then fetches captions.
+ * This is the same approach server-side tools like NoteGPT use.
+ */
+async function handleExtractYoutubeTranscriptById({ videoId }) {
+  // Strategy A: Parse ytInitialPlayerResponse from page HTML
+  try {
+    const pageResponse = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+      headers: {
+        'Accept-Language': 'en-US,en;q=0.9',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      },
+    });
+
+    if (pageResponse.ok) {
+      const html = await pageResponse.text();
+
+      // Try multiple markers — YouTube changes variable names across page versions
+      const markers = ['ytInitialPlayerResponse', 'var ytInitialPlayerResponse'];
+      let playerData = null;
+      let details = {};
+      let tracks = [];
+
+      for (const startMarker of markers) {
+        const markerIdx = html.indexOf(startMarker);
+        if (markerIdx === -1) continue;
+
+        const jsonStart = html.indexOf('{', markerIdx + startMarker.length);
+        if (jsonStart === -1) continue;
+
+        let depth = 0;
+        let jsonEnd = -1;
+        for (let i = jsonStart; i < html.length; i++) {
+          const ch = html[i];
+          if (ch === '{') depth++;
+          else if (ch === '}') {
+            depth--;
+            if (depth === 0) {
+              jsonEnd = i + 1;
+              break;
+            }
+          }
+        }
+
+        if (jsonEnd === -1) continue;
+
+        try {
+          playerData = JSON.parse(html.slice(jsonStart, jsonEnd));
+          details = playerData.videoDetails || {};
+          tracks = playerData.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+          if (tracks.length > 0) break;
+        } catch { playerData = null; }
+      }
+
+      if (tracks.length > 0) {
+        const result = await fetchCaptionTrack(tracks, details);
+        if (result.success) return result;
+      }
+    }
+  } catch (err) {
+    console.log('[LobsterCLI] Strategy A (page HTML) failed:', err.message);
+  }
+
+  // Strategy B: YouTube innertube API — more reliable, doesn't depend on HTML parsing
+  try {
+    const innertubeResponse = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        videoId,
+        context: {
+          client: {
+            clientName: 'WEB',
+            clientVersion: '2.20241126.01.00',
+            hl: 'en',
+          },
+        },
+      }),
+    });
+
+    if (innertubeResponse.ok) {
+      const data = await innertubeResponse.json();
+      const details = data.videoDetails || {};
+      const tracks = data.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+
+      if (tracks.length > 0) {
+        const result = await fetchCaptionTrack(tracks, details);
+        if (result.success) return result;
+      }
+
+      return { success: false, error: tracks.length === 0 ? 'No caption tracks available for this video' : 'Caption fetch failed' };
+    }
+  } catch (err) {
+    console.log('[LobsterCLI] Strategy B (innertube API) failed:', err.message);
+  }
+
+  return { success: false, error: 'All transcript extraction strategies failed' };
+}
+
+/**
+ * Given caption tracks and video details, pick the best track and fetch its text.
+ */
+async function fetchCaptionTrack(tracks, details) {
+  const bestTrack =
+    tracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr') ||
+    tracks.find(t => t.languageCode?.startsWith('en')) ||
+    tracks.find(t => t.kind !== 'asr') ||
+    tracks[0];
+
+  if (!bestTrack?.baseUrl) {
+    return { success: false, error: 'No valid caption URL found' };
+  }
+
+  const captionResponse = await fetch(bestTrack.baseUrl);
+  const captionXml = await captionResponse.text();
+
+  const segments = [];
+  const textRegex = /<text[^>]*>([\s\S]*?)<\/text>/g;
+  let match;
+  while ((match = textRegex.exec(captionXml)) !== null) {
+    const text = decodeHtmlEntities(match[1]).replace(/\n/g, ' ').trim();
+    if (text) segments.push(text);
+  }
+
+  const fullText = segments.join(' ').replace(/\s+/g, ' ').trim();
+
+  if (!fullText) {
+    return { success: false, error: 'Transcript was empty' };
+  }
+
+  const lengthSeconds = parseInt(details.lengthSeconds || '0', 10);
+  const mins = Math.floor(lengthSeconds / 60);
+  const secs = lengthSeconds % 60;
+
+  return {
+    success: true,
+    text: fullText,
+    metadata: {
+      title: details.title || 'Unknown',
+      channel: details.author || 'Unknown',
+      duration: `${mins}:${String(secs).padStart(2, '0')}`,
+      language: bestTrack.languageCode || 'unknown',
+      captionType: bestTrack.kind === 'asr' ? 'auto-generated' : 'manual',
+    },
+    wordCount: fullText.split(/\s+/).filter(Boolean).length,
+  };
 }
 
 /**
