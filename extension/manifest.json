@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "LobsterCLI",
-  "version": "0.4.0",
+  "version": "0.5.1",
   "description": "AI-powered page analysis, YouTube transcript extraction, smart Q&A, and content summaries — powered by LobsterCLI's in-house engine.",
   "permissions": [
     "activeTab",
     "storage",
     "scripting",
     "sidePanel",
-    "tabs"
+    "tabs",
+    "offscreen"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -41,7 +42,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["shared/*.js"],
+      "resources": ["shared/*.js", "shared/pdfjs/*.mjs"],
       "matches": ["<all_urls>"]
     }
   ]

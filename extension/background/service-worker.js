@@ -349,55 +349,38 @@ async function callAnthropic(baseURL, apiKey, model, systemPrompt, userPrompt, s
 
 /**
  * Extract text from a PDF URL.
- * Uses pdf.js (Mozilla) which works in service worker context.
+ * Delegates to an offscreen document — pdf.js needs a Web Worker, which
+ * MV3 service workers cannot spawn. All code (including pdf.js) is bundled
+ * locally; no remote code is loaded.
  */
+const OFFSCREEN_PATH = 'offscreen/offscreen.html';
+
+async function ensureOffscreenDocument() {
+  const offscreenUrl = chrome.runtime.getURL(OFFSCREEN_PATH);
+  const existing = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+    documentUrls: [offscreenUrl],
+  });
+  if (existing.length > 0) return;
+
+  await chrome.offscreen.createDocument({
+    url: OFFSCREEN_PATH,
+    reasons: ['WORKERS'],
+    justification: 'Run pdf.js (requires a Web Worker) to extract text from PDF documents.',
+  });
+}
+
 async function handleExtractPdf({ url }) {
   try {
-    // Import pdf.js from CDN (works in service workers)
-    const pdfjsLib = await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs');
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs';
-
-    // Fetch PDF
-    const response = await fetch(url);
-    const arrayBuffer = await response.arrayBuffer();
-
-    // Load PDF document
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-    const numPages = pdf.numPages;
-    const pages = [];
-    let fullText = '';
-
-    // Extract text from all pages
-    for (let i = 1; i <= numPages; i++) {
-      const page = await pdf.getPage(i);
-      const textContent = await page.getTextContent();
-      const pageText = textContent.items
-        .map(item => item.str)
-        .join(' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      pages.push(pageText);
-      fullText += pageText + '\n\n';
-    }
-
-    // Extract metadata
-    const metadata = await pdf.getMetadata().catch(() => ({}));
-    const info = metadata?.info || {};
-
-    return {
-      success: true,
-      text: fullText.trim(),
-      pages,
-      metadata: {
-        title: info.Title || 'untitled',
-        author: info.Author || '',
-        pages: numPages,
-        creator: info.Creator || '',
-      },
-      wordCount: fullText.split(/\s+/).filter(Boolean).length,
-    };
+    await ensureOffscreenDocument();
+    const result = await chrome.runtime.sendMessage({
+      target: 'offscreen-pdf',
+      action: 'extractPdf',
+      url,
+    });
+    return result || { success: false, error: 'No response from PDF extractor' };
   } catch (err) {
-    return { success: false, error: err.message };
+    return { success: false, error: err.message || String(err) };
   }
 }
 
